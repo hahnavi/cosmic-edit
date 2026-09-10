@@ -1401,6 +1401,7 @@ dependencies = [
  "regex",
  "rust-embed",
  "serde",
+ "serde_json",
  "syntect",
  "tokio",
  "two-face",

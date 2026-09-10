@@ -279,6 +279,75 @@ impl EditorTab {
         editor.changed()
     }
 
+    /// Full buffer contents of the tab
+    pub fn text(&self) -> String {
+        let editor = self.editor.lock().unwrap();
+        editor_text(&editor)
+    }
+
+    /// Cursor position as (line, index)
+    pub fn cursor(&self) -> (usize, usize) {
+        let editor = self.editor.lock().unwrap();
+        let cursor = editor.cursor();
+        (cursor.line, cursor.index)
+    }
+
+    /// Scroll position as (line, vertical, horizontal)
+    pub fn scroll(&self) -> (usize, f32, f32) {
+        let editor = self.editor.lock().unwrap();
+        let scroll = editor.with_buffer(|buffer| buffer.scroll());
+        (scroll.line, scroll.vertical, scroll.horizontal)
+    }
+
+    /// Restore unsaved text and mark the tab as changed; the operation is one undoable change.
+    pub fn restore_text(&mut self, text: &str) {
+        let mut editor = self.editor.lock().unwrap();
+        let mut font_system = font_system().write().unwrap();
+        let mut editor = editor.borrow_with(font_system.raw());
+        let end = editor.with_buffer(|buffer| {
+            let last_line = buffer.lines.len().saturating_sub(1);
+            cosmic_text::Cursor::new(
+                last_line,
+                buffer
+                    .lines
+                    .get(last_line)
+                    .map(|line| line.text().len())
+                    .unwrap_or(0),
+            )
+        });
+        editor.start_change();
+        editor.delete_range(cosmic_text::Cursor::new(0, 0), end);
+        editor.insert_at(cosmic_text::Cursor::new(0, 0), text, None);
+        editor.set_selection(Selection::None);
+        editor.finish_change();
+        editor.set_changed(true);
+    }
+
+    /// Restore a saved cursor position, clamped to the buffer contents
+    pub fn set_cursor_position(&mut self, line: usize, index: usize) {
+        let mut editor = self.editor.lock().unwrap();
+        let cursor = editor.with_buffer(|buffer| {
+            let line = line.min(buffer.lines.len().saturating_sub(1));
+            let index = buffer
+                .lines
+                .get(line)
+                .map(|line| line.text().len())
+                .unwrap_or(0)
+                .min(index);
+            Cursor::new(line, index)
+        });
+        editor.set_cursor(cursor);
+    }
+
+    /// Restore a saved scroll position
+    pub fn set_scroll_position(&mut self, line: usize, vertical: f32, horizontal: f32) {
+        let mut editor = self.editor.lock().unwrap();
+        editor.with_buffer_mut(|buffer| {
+            let line = line.min(buffer.lines.len().saturating_sub(1));
+            buffer.set_scroll(cosmic_text::Scroll::new(line, vertical, horizontal));
+        });
+    }
+
     pub fn icon(&self, size: u16) -> icon::Icon {
         match &self.path_opt {
             Some(path) => icon::icon(mime_icon(mime_for_path(path, None, false), size)).size(size),

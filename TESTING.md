@@ -28,6 +28,19 @@ This document provides a regression testing checklist for COSMIC Edit. The check
 - [ ] Close the file again, open COSMIC Edit again, and open the file via the Open dialog.
 - [ ] Turn word wrapping back on.
 
+### Session & tab context menu
+
+- [ ] Open two files and a new untitled tab, type unsaved text in each of them.
+- [ ] Quit with Ctrl-Q: no confirmation dialog should appear, the app should exit immediately.
+- [ ] Open COSMIC Edit again: all three tabs are restored in the same order, with the same active tab, and the unsaved text is still there (tabs show the unsaved indicator).
+- [ ] Cursor position and scroll position of each restored tab match what they were before quitting.
+- [ ] Open a file from the command line (`cosmic-edit some-file`): the previous session is not restored, only that file opens.
+- [ ] File -> New window: the new window starts with a single empty tab (it does not restore the session, and closing it does not overwrite the saved session).
+- [ ] Right click a tab title: the context menu shows Close, Close others, Close all, Save, Save as..., Reload, and Copy full file path.
+- [ ] Close others / Close all with unsaved tabs prompts to save, discard, or cancel; the prompt applies only to the tabs being closed.
+- [ ] Middle click a tab closes it (with the usual unsaved-changes prompt if modified).
+- [ ] Close the last tab: the app exits, and the next launch starts with a single empty tab.
+
 ### Settings
 
 - [ ] Open View -> Settings.

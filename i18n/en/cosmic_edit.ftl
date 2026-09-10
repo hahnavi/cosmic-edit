@@ -89,6 +89,13 @@ menu-git-management = Git management...
 print = Print
 quit = Quit
 
+## Tab context menu
+close = Close
+close-others = Close others
+close-all = Close all
+reload = Reload
+copy-file-path = Copy full file path
+
 ## Edit
 edit = Edit
 undo = Undo

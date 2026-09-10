@@ -66,6 +66,9 @@ mod project;
 use self::search::ProjectSearchResult;
 mod search;
 
+use self::session::Session;
+mod session;
+
 use self::tab::{EditorTab, GitDiffTab, Tab};
 mod tab;
 
@@ -398,7 +401,7 @@ pub enum Message {
     ReorderTab(ReorderEvent),
     RevertAllChanges,
     Save(Option<segmented_button::Entity>),
-    SaveAll,
+    SaveAll(Vec<segmented_button::Entity>),
     SaveAsDialog(Option<segmented_button::Entity>),
     SaveAsResult(segmented_button::Entity, DialogResult),
     Scroll(f32),
@@ -408,13 +411,19 @@ pub enum Message {
     SyntaxTheme(usize, bool),
     TabActivate(segmented_button::Entity),
     TabActivateJump(usize),
+    TabBarContext,
     TabChanged(segmented_button::Entity),
     TabClose(segmented_button::Entity),
+    TabCloseAll,
     TabCloseForce(segmented_button::Entity),
+    TabCloseForceMany(Vec<segmented_button::Entity>),
+    TabCloseOthers(segmented_button::Entity),
     TabContextAction(segmented_button::Entity, Action),
     TabContextMenu(segmented_button::Entity, Option<Point>),
+    TabCopyPath(segmented_button::Entity),
     TabNext,
     TabPrev,
+    TabReload(segmented_button::Entity),
     TabSetCursor(segmented_button::Entity, Cursor),
     TabWidth(u16),
     Todo,
@@ -441,7 +450,7 @@ pub enum ContextPage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum DialogPage {
     PromptSaveClose(segmented_button::Entity),
-    PromptSaveQuit(Vec<segmented_button::Entity>),
+    PromptSaveMany(Vec<segmented_button::Entity>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -489,6 +498,7 @@ pub struct App {
         HashSet<(PathBuf, RecursiveMode)>,
     )>,
     modifiers: Modifiers,
+    session_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -624,20 +634,22 @@ impl App {
     pub fn open_tab(&mut self, path_opt: Option<PathBuf>) -> Option<segmented_button::Entity> {
         match self.new_tab(path_opt)? {
             NewTab::Exists(entity) => Some(entity),
-            NewTab::Tab(tab) => {
-                let entity = self
-                    .tab_model
-                    .insert()
-                    .text(tab.title())
-                    .icon(tab.icon(16))
-                    .data::<Tab>(Tab::Editor(tab))
-                    .closable()
-                    .activate()
-                    .id();
-                self.update_watcher();
-                Some(entity)
-            }
+            NewTab::Tab(tab) => Some(self.insert_editor_tab(tab)),
         }
+    }
+
+    fn insert_editor_tab(&mut self, tab: EditorTab) -> segmented_button::Entity {
+        let entity = self
+            .tab_model
+            .insert()
+            .text(tab.title())
+            .icon(tab.icon(16))
+            .data::<Tab>(Tab::Editor(tab))
+            .closable()
+            .activate()
+            .id();
+        self.update_watcher();
+        entity
     }
 
     /// Replace existing tab, `entity`, with contents loaded from `path`
@@ -713,6 +725,170 @@ impl App {
         self.save_config_state();
     }
 
+    /// Reopen a file from a restored session, without touching recent files
+    fn open_session_tab(&mut self, path: &Path) -> Option<segmented_button::Entity> {
+        let canonical = match fs::canonicalize(path) {
+            Ok(ok) => ok,
+            Err(err) => match path::absolute(path) {
+                Ok(ok) => ok,
+                Err(_) => {
+                    log::error!("failed to canonicalize {:?}: {}", path, err);
+                    return None;
+                }
+            },
+        };
+
+        let entities: Vec<_> = self.tab_model.iter().collect();
+        for entity in entities {
+            if let Some(Tab::Editor(tab)) = self.tab_model.data::<Tab>(entity)
+                && tab.path_opt.as_ref() == Some(&canonical)
+            {
+                self.tab_model.activate(entity);
+                return Some(entity);
+            }
+        }
+
+        let mut tab = EditorTab::new(&self.config);
+        tab.open(canonical);
+        Some(self.insert_editor_tab(tab))
+    }
+
+    /// Reopen the tabs from the previous run, including tabs that had unsaved
+    /// changes. Returns `true` if at least one tab was restored.
+    fn restore_session(&mut self) -> bool {
+        let Some(session) = Session::load() else {
+            return false;
+        };
+
+        // Entity of each restored tab, parallel to `session.tabs`
+        let mut entities = Vec::with_capacity(session.tabs.len());
+        for session_tab in session.tabs.iter() {
+            let entity_opt = match &session_tab.path {
+                Some(path) => self.open_session_tab(path),
+                None => {
+                    // Skip untitled tabs that were never modified
+                    if session_tab.text.is_none() {
+                        entities.push(None);
+                        continue;
+                    }
+                    Some(self.insert_editor_tab(EditorTab::new(&self.config)))
+                }
+            };
+            let Some(entity) = entity_opt else {
+                entities.push(None);
+                continue;
+            };
+
+            if let Some(Tab::Editor(tab)) = self.tab_model.data_mut::<Tab>(entity) {
+                if let Some(text) = &session_tab.text {
+                    tab.restore_text(text);
+                }
+                let (line, index) = session_tab.cursor;
+                tab.set_cursor_position(line, index);
+                let (line, vertical, horizontal) = session_tab.scroll;
+                tab.set_scroll_position(line, vertical, horizontal);
+            }
+
+            // Update the title in case unsaved contents were restored
+            if let Some(Tab::Editor(tab)) = self.tab_model.data::<Tab>(entity) {
+                let mut title = tab.title();
+                if tab.changed() {
+                    title.push_str(" \u{2022}");
+                }
+                self.tab_model.text_set(entity, title);
+            }
+
+            entities.push(Some(entity));
+        }
+
+        let restored = entities.iter().flatten().count();
+        if restored == 0 {
+            return false;
+        }
+
+        // Restore the active tab
+        if let Some(entity) = entities
+            .get(session.active)
+            .and_then(|entity_opt| *entity_opt)
+            .or_else(|| entities.iter().flatten().next().copied())
+        {
+            self.tab_model.activate(entity);
+        }
+        true
+    }
+
+    /// Build the current session: open tabs, their order, the active tab and
+    /// the contents of tabs with unsaved changes.
+    fn build_session(&self) -> Session {
+        let mut tabs = Vec::new();
+        let mut active_tab_index = None;
+        let active_entity = self.tab_model.active();
+        for (position, entity) in self.tab_model.iter().enumerate() {
+            let Some(Tab::Editor(tab)) = self.tab_model.data::<Tab>(entity) else {
+                continue;
+            };
+            let changed = tab.changed();
+            if tab.path_opt.is_none() && !changed {
+                continue;
+            }
+            if entity == active_entity {
+                active_tab_index = Some(tabs.len());
+            }
+            let text = if changed { Some(tab.text()) } else { None };
+            let text_file = if changed {
+                Some(Session::text_file_name(position))
+            } else {
+                None
+            };
+            tabs.push(session::SessionTab {
+                path: tab.path_opt.clone(),
+                text_file,
+                cursor: tab.cursor(),
+                scroll: tab.scroll(),
+                text,
+            });
+        }
+
+        Session {
+            version: 1,
+            active: active_tab_index.unwrap_or(0),
+            tabs,
+        }
+    }
+
+    /// Persist the current session so it survives application exit
+    fn save_session(&self) {
+        if !self.session_enabled {
+            return;
+        }
+        if let Err(err) = self.build_session().save() {
+            log::error!("failed to save session: {}", err);
+        }
+    }
+
+    /// Close the given tabs, prompting for the unsaved ones
+    fn close_tabs(&mut self, entities: Vec<segmented_button::Entity>) -> Task<Message> {
+        let mut unsaved = Vec::new();
+        for entity in entities {
+            match self.tab_model.data::<Tab>(entity) {
+                Some(Tab::Editor(tab)) if tab.changed() => unsaved.push(entity),
+                Some(_) => {
+                    let _ = self.update(Message::TabCloseForce(entity));
+                }
+                None => {}
+            }
+        }
+
+        if unsaved.is_empty() {
+            return self.update_tab();
+        }
+
+        // Focus the first unsaved tab so the dialog is not confusing
+        let _ = self.update(Message::TabActivate(unsaved[0]));
+        self.dialog_page_opt = Some(DialogPage::PromptSaveMany(unsaved));
+        Task::none()
+    }
+
     fn update_config(&mut self) -> Task<Message> {
         //TODO: provide iterator over data
         let entities: Vec<_> = self.tab_model.iter().collect();
@@ -774,21 +950,24 @@ impl App {
                     self.dialog_page_opt = None;
                 }
             }
-            Some(DialogPage::PromptSaveQuit(ref _entities)) => {
+            Some(DialogPage::PromptSaveMany(ref entities)) => {
+                let entities = entities.clone();
                 let mut unsaved = Vec::new();
-                for entity in self.tab_model.iter() {
+                for entity in entities {
                     if let Some(Tab::Editor(tab)) = self.tab_model.data::<Tab>(entity) {
                         if tab.changed() {
                             unsaved.push(entity);
+                        } else {
+                            let _ = self.update(Message::TabCloseForce(entity));
                         }
                     }
                 }
                 if unsaved.is_empty() {
-                    // All tabs have been saved, we can exit
-                    return self.update(Message::QuitForce);
+                    // All listed tabs have been saved and closed
+                    self.dialog_page_opt = None;
                 } else {
                     // Update dialog
-                    self.dialog_page_opt = Some(DialogPage::PromptSaveQuit(unsaved));
+                    self.dialog_page_opt = Some(DialogPage::PromptSaveMany(unsaved));
                 }
             }
             None => {}
@@ -882,6 +1061,30 @@ impl App {
                 .icon(icon_cache_get("folder-open-symbolic", 16))
                 .text(fl!("open-project"));
         }
+    }
+
+    /// Tab context menu tree
+    fn tab_context_menu(&self) -> Option<Vec<widget::menu::Tree<cosmic::Action<Message>>>> {
+        let children = self
+            .tab_model
+            .iter()
+            .map(|entity| match self.tab_model.data::<Tab>(entity) {
+                Some(Tab::Editor(tab)) => menu::tab_context_menu_items(
+                    &self.key_binds,
+                    entity,
+                    true,
+                    tab.path_opt.is_some(),
+                ),
+                _ => menu::tab_context_menu_items(&self.key_binds, entity, false, false),
+            })
+            .map(|items| {
+                widget::menu::Tree::with_children(Element::from(widget::Row::new()), items)
+            })
+            .collect::<Vec<_>>();
+        Some(vec![widget::menu::Tree::with_children(
+            Element::from(widget::Row::new()),
+            children,
+        )])
     }
 
     // Call this any time the tab changes
@@ -1505,22 +1708,42 @@ impl Application for App {
             project_search_has_focus: false,
             watcher_opt: None,
             modifiers: Modifiers::empty(),
+            session_enabled: true,
         };
 
         // Do not show nav bar by default. Will be opened by open_project if needed
         app.core.nav_bar_set_toggled(false);
+        // When files or projects are given as arguments, they replace the previous session
+        let mut restore_session = true;
         for arg in env::args().skip(1) {
+            if arg.starts_with('-') {
+                match arg.as_str() {
+                    // Open a fresh session (used by new windows)
+                    "--no-session" => {
+                        restore_session = false;
+                        app.session_enabled = false;
+                    }
+                    _ => log::warn!("unknown argument {:?}", arg),
+                }
+                continue;
+            }
             let path = PathBuf::from(arg);
             if path.is_dir() {
                 app.open_project(path);
             } else {
                 app.open_tab(Some(path));
             }
+            restore_session = false;
+        }
+
+        // Restore the previous session if nothing was passed as an argument
+        if restore_session && app.tab_model.iter().next().is_none() {
+            app.restore_session();
         }
 
         app.update_nav_bar_placeholder();
 
-        // Open an empty file if no arguments provided
+        // Open an empty file if no session was restored
         if app.tab_model.iter().next().is_none() {
             app.open_tab(None);
         }
@@ -1674,7 +1897,7 @@ impl Application for App {
                     .tertiary_action(cancel_button);
                 Some(dialog.into())
             }
-            DialogPage::PromptSaveQuit(entities) => {
+            DialogPage::PromptSaveMany(entities) => {
                 let mut can_save_all = true;
                 let mut column = widget::column::with_capacity(entities.len()).spacing(space_xxs);
                 for entity in entities.iter() {
@@ -1682,7 +1905,7 @@ impl Application for App {
                         let mut row = widget::row::with_capacity(3).align_y(Alignment::Center);
                         row = row.push(widget::text(tab.title()));
                         row = row.push(widget::space::horizontal());
-                        if let Some(_path) = &tab.path_opt {
+                        if tab.path_opt.is_some() {
                             row = row.push(
                                 widget::button::standard(fl!("save"))
                                     .on_press(Message::Save(Some(*entity))),
@@ -1702,10 +1925,10 @@ impl Application for App {
 
                 let mut save_button = widget::button::suggested(fl!("save-all"));
                 if can_save_all {
-                    save_button = save_button.on_press(Message::SaveAll);
+                    save_button = save_button.on_press(Message::SaveAll(entities.clone()));
                 }
-                let discard_button =
-                    widget::button::destructive(fl!("discard")).on_press(Message::QuitForce);
+                let discard_button = widget::button::destructive(fl!("discard"))
+                    .on_press(Message::TabCloseForceMany(entities.clone()));
                 let cancel_button =
                     widget::button::text(fl!("cancel")).on_press(Message::DialogCancel);
                 let dialog = widget::dialog()
@@ -2153,7 +2376,7 @@ impl Application for App {
             Message::NewWindow => {
                 //TODO: support multi-window in winit
                 match env::current_exe() {
-                    Ok(exe) => match process::Command::new(&exe).spawn() {
+                    Ok(exe) => match process::Command::new(&exe).arg("--no-session").spawn() {
                         Ok(_child) => {}
                         Err(err) => {
                             log::error!("failed to execute {:?}: {}", exe, err);
@@ -2558,12 +2781,11 @@ impl Application for App {
                 self.dialog_page_opt = Some(DialogPage::PromptSaveClose(entity));
             }
             Message::Quit => {
-                // Create empty dialog
-                self.dialog_page_opt = Some(DialogPage::PromptSaveQuit(Vec::new()));
-                // This update will get the actual list of unsaved tabs
-                return self.update_dialogs();
+                // Unsaved tabs are saved in the session, so quitting requires no prompt.
+                return self.update(Message::QuitForce);
             }
             Message::QuitForce => {
+                self.save_session();
                 process::exit(0);
             }
             Message::Redo => {
@@ -2597,7 +2819,7 @@ impl Application for App {
                 if let Some(Tab::Editor(tab)) = self.tab_model.data_mut::<Tab>(entity) {
                     match tab.path_opt.clone() {
                         Some(path) => {
-                            title_opt = Some(tab.title());
+                            title_opt = Some((entity, tab.title()));
                             tab.save();
                             if let Ok(canonical) = fs::canonicalize(&path) {
                                 self.add_to_recents(&canonical);
@@ -2608,17 +2830,18 @@ impl Application for App {
                         }
                     }
                 }
-                if let Some(title) = title_opt {
-                    self.tab_model.text_set(self.tab_model.active(), title);
+                if let Some((entity, title)) = title_opt {
+                    self.tab_model.text_set(entity, title);
                 }
                 return self.update_dialogs();
             }
-            Message::SaveAll => {
-                let entities: Vec<_> = self.tab_model.iter().collect();
+            Message::SaveAll(entities) => {
                 for entity in entities {
+                    let mut title_opt = None;
                     if let Some(Tab::Editor(tab)) = self.tab_model.data_mut::<Tab>(entity) {
                         match tab.path_opt.clone() {
                             Some(path) => {
+                                title_opt = Some(tab.title());
                                 tab.save();
                                 if let Ok(canonical) = fs::canonicalize(&path) {
                                     self.add_to_recents(&canonical);
@@ -2628,6 +2851,9 @@ impl Application for App {
                                 log::warn!("{} has no path when doing save all", tab.title());
                             }
                         }
+                    }
+                    if let Some(title) = title_opt {
+                        self.tab_model.text_set(entity, title);
                     }
                 }
                 return self.update_dialogs();
@@ -2825,6 +3051,47 @@ impl Application for App {
                     tab.context_menu = None;
                     // Run action's message
                     return self.update(action.message(None));
+                }
+            }
+            Message::TabCloseAll => {
+                let entities: Vec<_> = self.tab_model.iter().collect();
+                return self.close_tabs(entities);
+            }
+            Message::TabCloseForceMany(entities) => {
+                self.dialog_page_opt = None;
+                for entity in entities {
+                    let _ = self.update(Message::TabCloseForce(entity));
+                }
+                return self.update_tab();
+            }
+            Message::TabCloseOthers(entity) => {
+                let _ = self.update(Message::TabActivate(entity));
+                let entities: Vec<_> = self
+                    .tab_model
+                    .iter()
+                    .filter(|other| *other != entity)
+                    .collect();
+                return self.close_tabs(entities);
+            }
+            Message::TabBarContext => {
+                let entities: Vec<_> = self.tab_model.iter().collect();
+                for entity in entities {
+                    if let Some(Tab::Editor(tab)) = self.tab_model.data_mut::<Tab>(entity) {
+                        tab.context_menu = None;
+                    }
+                }
+            }
+            Message::TabCopyPath(entity) => {
+                if let Some(Tab::Editor(tab)) = self.tab_model.data::<Tab>(entity) {
+                    if let Some(path) = &tab.path_opt {
+                        return clipboard::write(format!("{}", path.display()));
+                    }
+                }
+            }
+            Message::TabReload(entity) => {
+                if let Some(Tab::Editor(tab)) = self.tab_model.data_mut::<Tab>(entity) {
+                    tab.reload();
+                    return self.update(Message::TabChanged(entity));
                 }
             }
             Message::TabContextMenu(entity, position_opt) => {
@@ -3060,22 +3327,33 @@ impl Application for App {
 
         let mut tab_column = widget::column::with_capacity(3).padding([space_none, space_xxs]);
 
+        // Tab popup views use `cosmic::Action<Message>`; the tab bar must match that type until libcosmic fixes its popup mapping.
+        let tab_bar =
+            widget::tab_bar::horizontal::<_, cosmic::Action<Message>>(&self.tab_model)
+                .button_height(32)
+                .enable_tab_drag(String::from("x-cosmic-edit/tab"))
+                .on_reorder(|event| cosmic::Action::App(Message::ReorderTab(event)))
+                .tab_drag_threshold(25.)
+                .button_spacing(space_xxs)
+                .close_icon(icon_cache_get("window-close-symbolic", 16))
+                //TODO: this causes issues with small window sizes .minimum_button_width(240)
+                .on_activate(|entity| cosmic::Action::App(Message::TabActivate(entity)))
+                .on_close(|entity| cosmic::Action::App(Message::TabClose(entity)))
+                .on_context(|_entity| cosmic::Action::App(Message::TabBarContext))
+                .on_middle_press(|entity| cosmic::Action::App(Message::TabClose(entity)))
+                .context_menu(self.tab_context_menu())
+                .window_id_maybe(self.core.main_window_id())
+                .on_surface_action(|action| cosmic::Action::App(Message::Surface(action)))
+                .width(Length::Shrink);
+        let tab_bar: Element<'_, Message> = Element::from(tab_bar).map(|action| match action {
+            cosmic::Action::App(message) => message,
+            _ => Message::NoOp,
+        });
+
         tab_column = tab_column.push(
             widget::row::with_capacity(2)
                 .align_y(Alignment::Center)
-                .push(
-                    widget::tab_bar::horizontal(&self.tab_model)
-                        .button_height(32)
-                        .enable_tab_drag(String::from("x-cosmic-edit/tab"))
-                        .on_reorder(Message::ReorderTab)
-                        .tab_drag_threshold(25.)
-                        .button_spacing(space_xxs)
-                        .close_icon(icon_cache_get("window-close-symbolic", 16))
-                        //TODO: this causes issues with small window sizes .minimum_button_width(240)
-                        .on_activate(Message::TabActivate)
-                        .on_close(Message::TabClose)
-                        .width(Length::Shrink),
-                )
+                .push(tab_bar)
                 .push(
                     button::custom(icon_cache_get("list-add-symbolic", 16))
                         .on_press(Message::NewFile)

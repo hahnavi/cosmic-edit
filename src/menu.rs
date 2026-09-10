@@ -6,12 +6,12 @@ use cosmic::{
     Element,
     app::Core,
     iced::{
-        Background, Border, Length, advanced::widget::text::Style as TextStyle, widget::column,
+        Background, Border, Length, advanced::widget::text::Style as TextStyle,
     },
     theme,
     widget::{
         self, divider,
-        menu::{ItemHeight, ItemWidth, menu_button},
+        menu::{ItemHeight, ItemWidth, Tree as MenuTree, menu_button},
         responsive_menu_bar, segmented_button, space,
     },
 };
@@ -191,6 +191,90 @@ pub fn context_menu<'a>(
     })
     .width(Length::Fixed(240.0))
     .into()
+}
+
+pub fn tab_context_menu_items(
+    key_binds: &HashMap<KeyBind, Action>,
+    entity: segmented_button::Entity,
+    is_editor: bool,
+    has_path: bool,
+) -> Vec<MenuTree<cosmic::Action<Message>>> {
+    fn key_style(theme: &cosmic::Theme) -> TextStyle {
+        let mut color = theme.cosmic().background(false).component.on;
+        color.alpha *= 0.75;
+        TextStyle {
+            color: Some(color.into()),
+            ..Default::default()
+        }
+    }
+
+    let key_for = |action: &Action| {
+        for (key_bind, key_action) in key_binds.iter() {
+            if key_action == action {
+                return key_bind.to_string();
+            }
+        }
+        String::new()
+    };
+
+    let menu_item = |label: String, key: String, message: Message| {
+        MenuTree::from(Element::from(
+            menu_button(vec![
+                widget::text(label).into(),
+                space::horizontal().into(),
+                widget::text(key)
+                    .class(theme::Text::Custom(key_style))
+                    .into(),
+            ])
+            .on_press(cosmic::Action::App(message)),
+        ))
+    };
+
+    let divider_item = || MenuTree::from(Element::from(divider::horizontal::light()));
+
+    let mut items = Vec::new();
+    items.push(menu_item(
+        fl!("close"),
+        key_for(&Action::CloseFile),
+        Message::TabClose(entity),
+    ));
+    items.push(menu_item(
+        fl!("close-others"),
+        String::new(),
+        Message::TabCloseOthers(entity),
+    ));
+    items.push(menu_item(
+        fl!("close-all"),
+        String::new(),
+        Message::TabCloseAll,
+    ));
+    if is_editor {
+        items.push(divider_item());
+        items.push(menu_item(
+            fl!("save"),
+            key_for(&Action::Save),
+            Message::Save(Some(entity)),
+        ));
+        items.push(menu_item(
+            fl!("save-as"),
+            key_for(&Action::SaveAsDialog),
+            Message::SaveAsDialog(Some(entity)),
+        ));
+        if has_path {
+            items.push(divider_item());
+            items.push(menu_item(
+                fl!("reload"),
+                String::new(),
+                Message::TabReload(entity),
+            ));
+            items.push(menu_item(
+                fl!("copy-file-path"),
+                String::new(),
+                Message::TabCopyPath(entity),
+            ));
+        }
+    }
+    items
 }
 
 pub fn menu_bar<'a>(
