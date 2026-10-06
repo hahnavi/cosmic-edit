@@ -50,8 +50,6 @@ pub struct TextBox<'a, Message> {
     on_changed: Option<Message>,
     on_focus: Option<Message>,
     click_timing: Duration,
-    has_context_menu: bool,
-    on_context_menu: Option<Box<dyn Fn(Option<Point>) -> Message + 'a>>,
     highlight_current_line: bool,
     line_numbers: bool,
 }
@@ -70,8 +68,6 @@ where
             on_changed: None,
             on_focus: None,
             click_timing: Duration::from_millis(500),
-            has_context_menu: false,
-            on_context_menu: None,
             highlight_current_line: false,
             line_numbers: false,
         }
@@ -99,19 +95,6 @@ where
 
     pub fn click_timing(mut self, click_timing: Duration) -> Self {
         self.click_timing = click_timing;
-        self
-    }
-
-    pub fn has_context_menu(mut self, has_context_menu: bool) -> Self {
-        self.has_context_menu = has_context_menu;
-        self
-    }
-
-    pub fn on_context_menu(
-        mut self,
-        on_context_menu: impl Fn(Option<Point>) -> Message + 'a,
-    ) -> Self {
-        self.on_context_menu = Some(Box::new(on_context_menu));
         self
     }
 
@@ -762,6 +745,7 @@ where
                                 position: pos,
                                 color: Color::from_rgba(1.0, 1.0, 1.0, 1.0),
                                 clip_bounds,
+                                content_hash: 0,
                             });
                         }
                         _ => {
@@ -1263,18 +1247,6 @@ where
                                 });
                             }
                         }
-                    }
-
-                    // Update context menu state
-                    if let Some(on_context_menu) = &self.on_context_menu {
-                        shell.publish((on_context_menu)(if self.has_context_menu {
-                            None
-                        } else {
-                            match button {
-                                Button::Right => Some(p),
-                                _ => None,
-                            }
-                        }));
                     }
 
                     shell.capture_event();

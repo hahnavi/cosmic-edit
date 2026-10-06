@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use cosmic::{
-    iced::{Point, advanced::graphics::text::font_system},
+    iced::{advanced::graphics::text::font_system},
     widget::icon,
 };
 use cosmic_files::mime_icon::{FALLBACK_MIME_ICON, mime_for_path, mime_icon};
@@ -51,7 +51,6 @@ pub struct EditorTab {
     pub path_opt: Option<PathBuf>,
     attrs: Attrs<'static>,
     pub editor: Mutex<ViEditor<'static, 'static>>,
-    pub context_menu: Option<Point>,
     pub zoom_adj: i8,
 }
 
@@ -75,7 +74,6 @@ impl EditorTab {
             path_opt: None,
             attrs,
             editor: Mutex::new(ViEditor::new(editor)),
-            context_menu: None,
             zoom_adj,
         };
 

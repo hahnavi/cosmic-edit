@@ -11,7 +11,7 @@ use cosmic::{
     cosmic_theme, executor,
     font::Font,
     iced::{
-        self, Alignment, Background, Color, Length, Limits, Point, Subscription,
+        self, Alignment, Background, Color, Length, Limits, Subscription,
         advanced::graphics::text::font_system,
         clipboard, event,
         futures::{self, SinkExt},
@@ -406,7 +406,7 @@ pub enum Message {
     SaveAsResult(segmented_button::Entity, DialogResult),
     Scroll(f32),
     SelectAll,
-    Surface(surface::Action),
+    Surface(surface::Action<Message>),
     SystemThemeModeChange(cosmic_theme::ThemeMode),
     SyntaxTheme(usize, bool),
     TabActivate(segmented_button::Entity),
@@ -419,7 +419,6 @@ pub enum Message {
     TabCloseForceMany(Vec<segmented_button::Entity>),
     TabCloseOthers(segmented_button::Entity),
     TabContextAction(segmented_button::Entity, Action),
-    TabContextMenu(segmented_button::Entity, Option<Point>),
     TabCopyPath(segmented_button::Entity),
     TabNext,
     TabPrev,
@@ -2938,9 +2937,7 @@ impl Application for App {
                 }
             }
             Message::Surface(a) => {
-                return cosmic::task::message(cosmic::Action::Cosmic(
-                    cosmic::app::Action::Surface(a),
-                ));
+                return cosmic::task::message(cosmic::Action::Surface(a));
             }
             Message::SystemThemeModeChange(_theme_mode) => {
                 return self.update_config();
@@ -3046,9 +3043,7 @@ impl Application for App {
                 return self.update_tab();
             }
             Message::TabContextAction(entity, action) => {
-                if let Some(Tab::Editor(tab)) = self.tab_model.data_mut::<Tab>(entity) {
-                    // Close context menu
-                    tab.context_menu = None;
+                if let Some(Tab::Editor(_)) = self.tab_model.data::<Tab>(entity) {
                     // Run action's message
                     return self.update(action.message(None));
                 }
@@ -3074,12 +3069,7 @@ impl Application for App {
                 return self.close_tabs(entities);
             }
             Message::TabBarContext => {
-                let entities: Vec<_> = self.tab_model.iter().collect();
-                for entity in entities {
-                    if let Some(Tab::Editor(tab)) = self.tab_model.data_mut::<Tab>(entity) {
-                        tab.context_menu = None;
-                    }
-                }
+                // The tab bar manages its own context menu popup.
             }
             Message::TabCopyPath(entity) => {
                 if let Some(Tab::Editor(tab)) = self.tab_model.data::<Tab>(entity) {
@@ -3092,12 +3082,6 @@ impl Application for App {
                 if let Some(Tab::Editor(tab)) = self.tab_model.data_mut::<Tab>(entity) {
                     tab.reload();
                     return self.update(Message::TabChanged(entity));
-                }
-            }
-            Message::TabContextMenu(entity, position_opt) => {
-                if let Some(Tab::Editor(tab)) = self.tab_model.data_mut::<Tab>(entity) {
-                    // Update context menu
-                    tab.context_menu = position_opt;
                 }
             }
             Message::TabNext => {
@@ -3343,7 +3327,9 @@ impl Application for App {
                 .on_middle_press(|entity| cosmic::Action::App(Message::TabClose(entity)))
                 .context_menu(self.tab_context_menu())
                 .window_id_maybe(self.core.main_window_id())
-                .on_surface_action(|action| cosmic::Action::App(Message::Surface(action)))
+                .on_surface_action(|action| {
+                    cosmic::Action::App(Message::Surface(action.flatten()))
+                })
                 .width(Length::Shrink);
         let tab_bar: Element<'_, Message> = Element::from(tab_bar).map(|action| match action {
             cosmic::Action::App(message) => message,
@@ -3365,29 +3351,29 @@ impl Application for App {
         let tab_id = self.tab_model.active();
         match self.tab_model.data::<Tab>(tab_id) {
             Some(Tab::Editor(tab)) => {
+                let has_selection = tab.editor.lock().unwrap().selection() != Selection::None;
                 let mut text_box = text_box(&tab.editor, self.config.metrics(tab.zoom_adj()))
                     .id(self.text_box_id.clone())
                     .on_focus(Message::FindFocused(false))
                     .on_auto_scroll(Message::AutoScroll)
-                    .on_changed(Message::TabChanged(tab_id))
-                    .has_context_menu(tab.context_menu.is_some())
-                    .on_context_menu(move |position_opt| {
-                        Message::TabContextMenu(tab_id, position_opt)
-                    });
+                    .on_changed(Message::TabChanged(tab_id));
                 if self.config.highlight_current_line {
                     text_box = text_box.highlight_current_line();
                 }
                 if self.config.line_numbers {
                     text_box = text_box.line_numbers();
                 }
-                let mut popover = widget::popover(text_box);
-                let has_selection = tab.editor.lock().unwrap().selection() != Selection::None;
-                if let Some(point) = tab.context_menu {
-                    popover = popover
-                        .popup(menu::context_menu(&self.key_binds, tab_id, has_selection))
-                        .position(widget::popover::Position::Point(point));
-                }
-                tab_column = tab_column.push(popover);
+                let text_box = cosmic::widget::context_menu(
+                    text_box,
+                    Some(menu::editor_context_menu_items(
+                        &self.key_binds,
+                        tab_id,
+                        has_selection,
+                    )),
+                )
+                .window_id(self.core.main_window_id().unwrap_or(window::Id::NONE))
+                .on_surface_action(Message::Surface);
+                tab_column = tab_column.push(text_box);
                 if self.config.vim_bindings {
                     let status = {
                         let editor = tab.editor.lock().unwrap();

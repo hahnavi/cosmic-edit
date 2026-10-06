@@ -6,7 +6,7 @@ use cosmic::{
     Element,
     app::Core,
     iced::{
-        Background, Border, Length, advanced::widget::text::Style as TextStyle,
+        Length, advanced::widget::text::Style as TextStyle,
     },
     theme,
     widget::{
@@ -116,13 +116,12 @@ fn format_recent_menu_path(path: &PathBuf, home_dir_opt: Option<&PathBuf>) -> St
     truncate_middle(&display, RECENT_MENU_LABEL_MAX_CHARS)
 }
 
-pub fn context_menu<'a>(
+pub fn editor_context_menu_items(
     key_binds: &HashMap<KeyBind, Action>,
     entity: segmented_button::Entity,
     has_selection: bool,
-) -> Element<'a, Message> {
+) -> Vec<MenuTree<Message>> {
     fn key_style(theme: &cosmic::Theme) -> TextStyle {
-        // TODO use wayland popups
         let mut color = theme.cosmic().background(false).component.on;
         color.alpha *= 0.75;
         TextStyle {
@@ -131,66 +130,48 @@ pub fn context_menu<'a>(
         }
     }
 
-    let base_menu_item = |menu_label, menu_action| {
-        let mut key = String::new();
+    let key_for = |action: &Action| {
         for (key_bind, key_action) in key_binds.iter() {
-            if key_action == &menu_action {
-                key = key_bind.to_string();
-                break;
+            if key_action == action {
+                return key_bind.to_string();
             }
         }
-        menu_button(vec![
-            widget::text(menu_label).into(),
-            space::horizontal().into(),
-            widget::text(key)
-                .class(theme::Text::Custom(key_style))
-                .into(),
-        ])
+        String::new()
     };
 
-    let optional_menu_item = |menu_label, menu_action, disabled| {
-        base_menu_item(menu_label, menu_action).on_press_maybe(if disabled {
-            None
-        } else {
-            Some(Message::TabContextAction(entity, menu_action))
-        })
+    let menu_item = |menu_label: String, menu_action: Action, enabled: bool| {
+        MenuTree::from(Element::from(
+            menu_button(vec![
+                widget::text(menu_label).into(),
+                space::horizontal().into(),
+                widget::text(key_for(&menu_action))
+                    .class(theme::Text::Custom(key_style))
+                    .into(),
+            ])
+            .on_press_maybe(
+                enabled.then_some(Message::TabContextAction(entity, menu_action)),
+            ),
+        ))
     };
 
-    let menu_item = |menu_label, menu_action| {
-        base_menu_item(menu_label, menu_action)
-            .on_press(Message::TabContextAction(entity, menu_action))
+    let divider_item = || {
+        MenuTree::from(Element::from(
+            widget::container(divider::horizontal::light())
+                .padding([4, 0])
+                .width(Length::Fill),
+        ))
     };
 
-    widget::container(
-        cosmic::widget::menu::menu_column::MenuColumn::with_children([
-            menu_item(fl!("undo"), Action::Undo).into(),
-            menu_item(fl!("redo"), Action::Redo).into(),
-            divider::horizontal::light().into(),
-            optional_menu_item(fl!("cut"), Action::Cut, !has_selection).into(),
-            optional_menu_item(fl!("copy"), Action::Copy, !has_selection).into(),
-            menu_item(fl!("paste"), Action::Paste).into(),
-            menu_item(fl!("select-all"), Action::SelectAll).into(),
-        ]),
-    )
-    .padding(1)
-    //TODO: move style to libcosmic
-    .style(|theme| {
-        let cosmic = theme.cosmic();
-        let component = &cosmic.background(false).component;
-        widget::container::Style {
-            icon_color: Some(component.on.into()),
-            text_color: Some(component.on.into()),
-            background: Some(Background::Color(component.base.into())),
-            border: Border {
-                radius: cosmic.radius_s().map(|x| x + 1.0).into(),
-                width: 1.0,
-                color: component.divider.into(),
-            },
-            ..Default::default()
-        }
-    })
-    .width(Length::Fixed(240.0))
-    .into()
+    vec![
+        menu_item(fl!("undo"), Action::Undo, true),
+        menu_item(fl!("redo"), Action::Redo, true),
+        divider_item(),
+        menu_item(fl!("cut"), Action::Cut, has_selection),
+        menu_item(fl!("copy"), Action::Copy, has_selection),
+        menu_item(fl!("paste"), Action::Paste, true),
+        divider_item(),
+        menu_item(fl!("select-all"), Action::SelectAll, has_selection),
+    ]
 }
 
 pub fn tab_context_menu_items(
@@ -230,7 +211,13 @@ pub fn tab_context_menu_items(
         ))
     };
 
-    let divider_item = || MenuTree::from(Element::from(divider::horizontal::light()));
+    let divider_item = || {
+        MenuTree::from(Element::from(
+            widget::container(divider::horizontal::light())
+                .padding([4, 0])
+                .width(Length::Fill),
+        ))
+    };
 
     let mut items = Vec::new();
     items.push(menu_item(
